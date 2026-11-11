@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Run the Kronig CLI (tcad-agent) from this checkout, whatever the install state.
+if command -v tcad-agent >/dev/null && [[ -z "${TCAD_PYTHON:-}" ]]; then exec tcad-agent "$@"; fi
+exec "$(dirname "${BASH_SOURCE[0]}")/kpy" -c "from tcad_agent.cli import app; app()" "$@"

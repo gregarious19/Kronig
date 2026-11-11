@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Run Python with Kronig importable from this checkout.
+# Interpreter: $TCAD_PYTHON, else .venv/bin/python, else env/bin/python, else python3.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+for py in "${TCAD_PYTHON:-}" "$ROOT/.venv/bin/python" "$ROOT/env/bin/python" python3; do
+  [[ -n "$py" && -x "$(command -v "$py" 2>/dev/null)" ]] && break
+done
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" exec "$py" "$@"

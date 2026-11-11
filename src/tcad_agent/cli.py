@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated
 
@@ -26,6 +27,8 @@ from tcad_agent.experiments.service import ExperimentEngine
 from tcad_agent.knowledge.ingest import KnowledgeIngestor
 from tcad_agent.knowledge.models import SourceManifest
 from tcad_agent.knowledge.retrieve import KnowledgeIndex
+from tcad_agent.planning import digest as planning_digest
+from tcad_agent.planning import service as planning
 from tcad_agent.runners.models import RunBudget
 
 load_dotenv()
@@ -36,13 +39,19 @@ evaluation_app = typer.Typer(help="Inspect versioned TCAD agent evaluation promp
 conformance_app = typer.Typer(help="Compare verified canonical backend evidence bundles.")
 app.add_typer(knowledge_app, name="knowledge")
 app.add_typer(evaluation_app, name="evaluation")
+plan_app = typer.Typer(
+    help="Plan experiment micro-task runs: digest, check, ask, and render stage tasks."
+)
 app.add_typer(conformance_app, name="conformance")
+app.add_typer(plan_app, name="plan")
 
 DEFAULT_COMPILED_OUTPUT = Path("compiled")
 DEFAULT_RUN_OUTPUT = Path("runs")
 DEFAULT_KNOWLEDGE_INDEX = Path("knowledge-sources/index/knowledge.sqlite3")
 DEFAULT_AGENT_EVALUATIONS = Path("evaluations/agent/cases.yaml")
 DEFAULT_CONFORMANCE_RULES = Path("evaluations/conformance/cases.yaml")
+DEFAULT_MICROTASK_ROOT = Path(".microtasks")
+DEFAULT_EXAMPLES = Path("examples")
 
 
 def _load_spec(path: Path) -> ExperimentSpec:
@@ -237,3 +246,106 @@ def build_knowledge_command(
         typer.echo(f"knowledge build failed: {exc}", err=True)
         raise typer.Exit(2) from exc
     typer.echo(f"indexed {len(passages)} passages at {index}")
+
+
+def _report_problems(problems: list[str], ok_message: str, heading: str) -> None:
+    if problems:
+        typer.echo(heading + ":\n- " + "\n- ".join(problems))
+        raise typer.Exit(1)
+    typer.echo(ok_message)
+
+
+def _planning_step[T](step: Callable[[], T]) -> T:
+    try:
+        return step()
+    except (planning.PlanningError, OSError, ValueError, KeyError, yaml.YAMLError) as exc:
+        typer.echo(f"planning failed: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+
+@plan_app.command("digest")
+def plan_digest_command(
+    paths: list[Path],
+    out_dir: Annotated[Path | None, typer.Option("--out-dir")] = None,
+    flat: Annotated[bool, typer.Option("--flat")] = False,
+) -> None:
+    """Print a lossless digest of result files; large numeric arrays go verbatim to --out-dir."""
+    text = _planning_step(lambda: planning_digest.render(paths, out_dir=out_dir, flat=flat))
+    typer.echo(text, nl=False)
+
+
+@plan_app.command("prepare")
+def plan_prepare_command(
+    slug: str,
+    results: list[Path],
+    goal: Annotated[str, typer.Option("--goal")],
+    runs_root: Annotated[
+        Path, typer.Option("--runs-root", envvar="MICROTASKS_DIR")
+    ] = DEFAULT_MICROTASK_ROOT,
+    examples: Annotated[Path, typer.Option("--examples")] = DEFAULT_EXAMPLES,
+    cli: Annotated[
+        str, typer.Option("--cli", help="Command that later tasks use to call this CLI.")
+    ] = "tcad-agent",
+) -> None:
+    """Create a run: digest, Kronig context pack, plan template, and planning tasks."""
+    prepared = _planning_step(
+        lambda: planning.prepare(
+            slug, goal, results, runs_root=runs_root, examples_dir=examples, cli=cli
+        )
+    )
+    typer.echo(prepared.summary)
+
+
+@plan_app.command("check-plan")
+def plan_check_command(run: Path) -> None:
+    """Validate plan.yaml and backend feasibility."""
+    _report_problems(
+        _planning_step(lambda: planning.check_plan(run)), "plan ok", "PLAN NOT FEASIBLE / INVALID"
+    )
+
+
+@plan_app.command("check-requirements")
+def plan_check_requirements_command(run: Path) -> None:
+    """Validate requirements.json and re-verify every lab value against its raw file."""
+    _report_problems(
+        _planning_step(lambda: planning.check_requirements(run)),
+        "requirements ok: every lab value verified against its raw file",
+        "REQUIREMENTS INVALID",
+    )
+
+
+@plan_app.command("questions")
+def plan_questions_command(run: Path) -> None:
+    """Write questions.md for unanswered missing or conflicting inputs; exit 1 while any remain."""
+    items = _planning_step(lambda: planning.open_questions(run))
+    if items:
+        typer.echo((run / "inputs" / "questions.md").read_text(), nl=False)
+        raise typer.Exit(1)
+    typer.echo("no open questions")
+
+
+@plan_app.command("render")
+def plan_render_command(run: Path) -> None:
+    """Render the experiment tasks.json and task files from plan, requirements, and answers."""
+    count = _planning_step(lambda: planning.render(run))
+    typer.echo(f"rendered {count} tasks into {run / 'tasks.json'}")
+
+
+@plan_app.command("check-spec")
+def plan_check_spec_command(run: Path, experiment: str) -> None:
+    """Check that an authored spec carries every required value."""
+    _report_problems(
+        _planning_step(lambda: planning.check_spec(run, experiment)),
+        "spec carries every required value",
+        "SPEC DOES NOT CARRY REQUIRED VALUES",
+    )
+
+
+@plan_app.command("check-results")
+def plan_check_results_command(run: Path, experiment: str) -> None:
+    """Check an experiment's results file against its bundle."""
+    _report_problems(
+        _planning_step(lambda: planning.check_results(run, experiment)),
+        "results ok",
+        "RESULTS INCOMPLETE",
+    )
